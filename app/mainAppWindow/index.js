@@ -238,6 +238,33 @@ const AUTH_COOKIE_NAMES = new Set([
   'rtFa',
 ]);
 
+// Domains whose auth cookies we extend to survive app restarts.
+// Electron (like Chromium) clears session cookies on close even in persistent
+// partitions. ESTSAUTH is a session cookie — this makes it persistent.
+const AUTH_COOKIE_PERSIST_DOMAINS = new Set([
+  'login.microsoftonline.com',
+  'login.microsoft.com',
+]);
+const AUTH_COOKIE_PERSIST_SECONDS = 90 * 24 * 60 * 60; // 90 days
+
+/**
+ * Given a single Set-Cookie string, if it names one of our auth cookies,
+ * strips any existing Max-Age/Expires and injects a 90-day Max-Age so the
+ * cookie is stored persistently on disk instead of being a session cookie.
+ */
+function persistAuthCookie(setCookieStr) {
+  const cookieName = setCookieStr.split('=')[0].trim();
+  if (!AUTH_COOKIE_NAMES.has(cookieName)) return setCookieStr;
+
+  const modified = setCookieStr
+    .replace(/;\s*max-age=\d+/gi, '')
+    .replace(/;\s*expires=[^;]+/gi, '')
+    + `; Max-Age=${AUTH_COOKIE_PERSIST_SECONDS}`;
+
+  console.debug(`[AUTH_PERSIST] Stamped 90-day Max-Age on cookie: ${cookieName}`);
+  return modified;
+}
+
 // localStorage key patterns for MSAL/Teams auth tokens
 const AUTH_LOCAL_STORAGE_PATTERNS = [
   'tmp.auth.v1.', 'refresh_token', 'msal.token', 'msal.',
@@ -698,9 +725,24 @@ function onBeforeRequestHandler(details, callback) {
 function onHeadersReceivedHandler(details, callback) {
   customBackgroundService.onHeadersReceivedHandler(details);
 
-  callback({
-    responseHeaders: details.responseHeaders,
-  });
+  let { responseHeaders } = details;
+
+  // Extend auth cookie lifetimes so they survive app restarts.
+  // ESTSAUTH is a session cookie by default — Chromium/Electron clears it on
+  // close even in persistent partitions, forcing a Shibboleth re-auth daily.
+  try {
+    const hostname = new URL(details.url).hostname;
+    if (AUTH_COOKIE_PERSIST_DOMAINS.has(hostname) && responseHeaders['set-cookie']) {
+      responseHeaders = {
+        ...responseHeaders,
+        'set-cookie': responseHeaders['set-cookie'].map(persistAuthCookie),
+      };
+    }
+  } catch {
+    // Malformed URL — skip cookie extension, proceed normally
+  }
+
+  callback({ responseHeaders });
 }
 
 function onBeforeSendHeadersHandler(detail, callback) {
