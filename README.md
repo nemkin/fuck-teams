@@ -91,6 +91,22 @@ On login you should see:
 
 Then close the app and reopen it the next day — if Teams loads without a Shibboleth redirect, the fix is working.
 
+## If the Fix Doesn't Work
+
+If Teams still asks you to log in after a restart, the server-side AAD session has a hard 24-hour expiry and keeping the cookie alive client-side isn't enough. These are the next approaches to try, roughly in order of effort:
+
+**Option 1 — User-Agent spoofing**
+
+Azure AD Conditional Access policies can differentiate by platform. Intercepting requests to `login.microsoftonline.com` via `onBeforeSendHeaders` and replacing the User-Agent with the Teams Android app string might cause BME's tenant to apply mobile token lifetime policies instead of browser policies. Two lines of code to try.
+
+**Option 2 — MSAL capability header spoofing**
+
+MSAL clients identify themselves via the `x-client-sku` request header: `MSAL.js.browser` for web, `MSAL.Android` for Android, `MSAL.Node` for Node. Swapping this header on outgoing auth requests is trivial in Electron's `onBeforeSendHeaders` and might change how AAD classifies the client.
+
+**Option 3 — Microsoft native SSO seeding endpoint**
+
+The real Teams desktop app on Windows initializes its WebView2 with auth cookies by calling an internal Microsoft endpoint (believed to be around `https://teams.microsoft.com/api/authsvc/v1.0/authz`) and passing a native access token, getting back `ESTSAUTH` and friends directly. We already have a working 90-day sliding-window refresh token from msal-node using the Teams desktop client ID (`1fec8e78-bce4-4aaf-ab1b-5451cc387264`) — confirmed working against BME's tenant. If this endpoint can be identified and called with that token, we get a fresh `ESTSAUTH` cookie on every app startup without Shibboleth ever being involved. This is the most complete fix but requires reverse-engineering the endpoint.
+
 ## Credits
 
 - [IsmaelMartinez/teams-for-linux](https://github.com/IsmaelMartinez/teams-for-linux) — the upstream project this is based on
