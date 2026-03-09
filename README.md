@@ -1,111 +1,79 @@
-# Teams for Linux
+# fuck-teams
 
-[![Matrix Space](https://img.shields.io/matrix/teams-for-linux-space%3Amatrix.org?server_fqdn=matrix.org&label=Matrix%20Space)](https://matrix.to/#/#teams-for-linux-space:matrix.org "Matrix Space")
-![](https://img.shields.io/github/release/IsmaelMartinez/teams-for-linux.svg?style=flat)
-![](https://img.shields.io/github/downloads/IsmaelMartinez/teams-for-linux/total.svg?style=flat)
-![Build & Release](https://github.com/IsmaelMartinez/teams-for-linux/workflows/Build%20&%20Release/badge.svg)
-![](https://img.shields.io/librariesio/github/IsmaelMartinez/teams-for-linux)
-[![Known Vulnerabilities](https://snyk.io//test/github/IsmaelMartinez/teams-for-linux/badge.svg?targetFile=package.json)](https://snyk.io//test/github/IsmaelMartinez/teams-for-linux?targetFile=package.json)
-[![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=IsmaelMartinez_teams-for-linux&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=IsmaelMartinez_teams-for-linux)
+A fork of [teams-for-linux](https://github.com/IsmaelMartinez/teams-for-linux) with a vibe coded fix for the daily Shibboleth re-authentication problem at BME (Budapest University of Technology and Economics) — and likely any other university or enterprise using federated AAD login with short session policies.
 
-**Unofficial Microsoft Teams client for Linux** — a native desktop app that wraps the Teams web version with enhanced Linux integration.
+## The Problem
 
-✅ **System notifications**  
-✅ **System tray integration** (badge support varies by desktop environment)  
-✅ **Custom backgrounds & themes**  
-✅ **Screen sharing support**  
-✅ **Multiple account profiles**  
+BME uses Shibboleth (SAML) as its identity provider, federated into Microsoft AAD. On Linux, Teams requires re-authentication every day. On Android, it stays logged in for months.
 
-> [!NOTE]
-> This is an independent project, not affiliated with Microsoft. Some features are limited by the Teams web app.
+The difference is not magical — it comes down to how Chromium (and Electron) handles session cookies.
 
-## Sponsor
+When you log into Teams, Microsoft AAD sets a cookie called `ESTSAUTH` on `login.microsoftonline.com`. This is the AAD session cookie. If it is present and valid, AAD will silently re-authenticate MSAL.js (Teams web's auth library) without redirecting to Shibboleth. If it is missing or expired, AAD redirects to Shibboleth, which asks for your BME username and password again.
 
-### Recall.ai — API for Meeting Recording and Transcription
-> If you're looking for a meeting recording API, consider checking out [Recall.ai](https://www.recall.ai/product/microsoft-teams-recording-api?utm_source=github&utm_medium=sponsorship&utm_campaign=ismaelmartinez-teams-for-linux), an API that records and transcribes Zoom, Google Meet, Microsoft Teams, in-person meetings, and more.
+The `ESTSAUTH` cookie is issued as a **session cookie** — it has no `Max-Age` or `Expires` attribute. Chromium's standard behavior, even in a persistent profile, is to clear session cookies when the browser (or app) closes. So every time you close teams-for-linux, the ESTSAUTH cookie is wiped from disk. Next morning, no cookie → Shibboleth login.
 
-_This sponsorship helps support the ongoing development of teams-for-linux._
+The Android app stays logged in because it does not use a browser-based cookie session at all — it uses a native OAuth flow with a long-lived refresh token stored in the Android Account Manager.
 
-## Installation
+## The Fix
 
-### Package Repositories
+In `app/mainAppWindow/index.js`, we intercept every `Set-Cookie` response header from `login.microsoftonline.com` using Electron's `session.webRequest.onHeadersReceived`. For any auth-related cookie (`ESTSAUTH`, `ESTSAUTHPERSISTENT`, `ESTSAUTHLIGHT`, `FedAuth`, etc.), we strip any existing `Max-Age`/`Expires` attributes and replace them with `Max-Age=7776000` (90 days). Electron then stores the cookie persistently on disk instead of treating it as a session cookie.
 
-We have a dedicated deb and rpm repo at https://teamsforlinux.de hosted with :heart: by [Nils Büchner](https://github.com/nbuechner). Please follow the installation instructions below.
+On next startup, the cookie is still there. AAD sees it, validates it, and silently re-authenticates Teams without touching Shibboleth.
 
-**Debian/Ubuntu:**
+The relevant functions are `persistAuthCookie()` and the modified `onHeadersReceivedHandler()`.
+
+## What Was Investigated First
+
+Before landing on this fix, several other approaches were explored and ruled out:
+
+**Upstream PR #2311** (`fix/auth-recovery-stale-session-2296`) addresses the same symptom but in the opposite direction: it detects when auth has gone stale and triggers a clean re-login. It makes the daily login less painful but does not prevent it. This fork is based on that branch.
+
+**MSAL-node native auth flow** — the Teams desktop client ID (`1fec8e78-bce4-4aaf-ab1b-5451cc387264`) does produce a 90-day sliding-window refresh token from BME's AAD tenant, confirming that long-lived tokens are possible. However, injecting these into the Teams web session proved impossible:
+- The Teams web client ID (`5e3ce6c0-2b1f-4285-8d4b-75ee78787346`) does not support device code or interactive public client flows
+- FOCI (Family of Client IDs) cross-client token exchange was blocked by BME's tenant for the web client
+- The web client does not have `http://localhost` registered as a redirect URI
+
+The cookie lifetime extension turned out to be the simpler and more direct fix.
+
+## What Could Go Wrong
+
+**The server-side AAD session may have a hard 24-hour expiry.**
+The `ESTSAUTH` cookie contains an encrypted session identifier. If BME's AAD tenant is configured to expire server-side sessions after 24 hours regardless of cookie presence, AAD will return `login_required` even when the cookie is present and not expired on the client side. In this case the fix will not help and the problem is purely a server-side policy enforced by BME's IT department.
+
+**BME may change their session policy.**
+If BME tightens their Conditional Access policies (shorter session lifetimes, require fresh MFA, etc.), this fix stops working even if it works today.
+
+**The fix only applies to the main Teams window.**
+`onHeadersReceivedHandler` is registered on `window.webContents.session`, which covers the main app window. If any hidden auth windows or iframes use a different session, those cookies would not be intercepted. In practice this has not been an issue but is worth knowing.
+
+**This is a fork, not a patch to upstream.**
+The upstream teams-for-linux project is actively maintained. This fork will diverge over time. Merging upstream changes requires manual rebasing.
+
+## Building
+
 ```bash
-sudo mkdir -p /etc/apt/keyrings
-sudo wget -qO /etc/apt/keyrings/teams-for-linux.asc https://repo.teamsforlinux.de/teams-for-linux.asc
-sh -c 'echo "Types: deb\nURIs: https://repo.teamsforlinux.de/debian/\nSuites: stable\nComponents: main\nSigned-By: /etc/apt/keyrings/teams-for-linux.asc\nArchitectures: amd64" | sudo tee /etc/apt/sources.list.d/teams-for-linux-packages.sources'
-sudo apt update && sudo apt install teams-for-linux
+npm install
+npm run dist:linux:deb   # produces dist/teams-for-linux_*.deb
 ```
 
-**RHEL/Fedora:**
+Install:
 ```bash
-curl -1sLf -o /tmp/teams-for-linux.asc https://repo.teamsforlinux.de/teams-for-linux.asc; sudo rpm --import /tmp/teams-for-linux.asc
-sudo curl -1sLf -o /etc/yum.repos.d/teams-for-linux.repo https://repo.teamsforlinux.de/rpm/teams-for-linux.repo
-sudo dnf -y install teams-for-linux
+sudo dpkg -i dist/teams-for-linux_*_amd64.deb
 ```
 
-### Distribution Packages
+## Verifying the Fix
 
-[![AUR: teams-for-linux](https://img.shields.io/badge/AUR-teams--for--linux-blue.svg)](https://aur.archlinux.org/packages/teams-for-linux)
-[![Pacstall: teams-for-linux-deb](https://img.shields.io/badge/Pacstall-teams--for--linux--deb-00958C)](https://github.com/pacstall/pacstall-programs/tree/master/packages/teams-for-linux-deb)  
-[![Get it from the Snap Store](https://snapcraft.io/static/images/badges/en/snap-store-black.svg)](https://snapcraft.io/teams-for-linux)
-<a href='https://flathub.org/apps/details/com.github.IsmaelMartinez.teams_for_linux'><img width='170' alt='Download on Flathub' src='https://flathub.org/assets/badges/flathub-badge-en.png'/></a>
+Run from source with `npm start`. On first login after clearing the session, you should see lines like:
 
-### Manual Download
+```
+[AUTH_PERSIST] Stamped 90-day Max-Age on cookie: ESTSAUTH
+[AUTH_PERSIST] Stamped 90-day Max-Age on cookie: ESTSAUTHPERSISTENT
+[AUTH_PERSIST] Stamped 90-day Max-Age on cookie: ESTSAUTHLIGHT
+```
 
-Download from [GitHub Releases](https://github.com/IsmaelMartinez/teams-for-linux/releases) — available as AppImage, deb, rpm, snap, tar.gz (plus Windows/macOS builds).
+Close the app and reopen it the next day. If Teams loads without a Shibboleth redirect, the fix is working.
 
-> [!TIP]
-> For AppImage files, use [`AppImageLauncher`](https://github.com/TheAssassin/AppImageLauncher) for better desktop integration.
+## Credits
 
-## Quick Start
-
-1. **Install** using your preferred method above
-2. **Launch** with `teams-for-linux` 
-3. **Configure** by creating `~/.config/teams-for-linux/config.json` if needed
-
-## Documentation
-
-📖 **[Complete Documentation](https://ismaelmartinez.github.io/teams-for-linux/)** — Enhanced documentation with search, mobile optimization, and comprehensive guides
-
-| Topic | Description |
-|-------|-------------|
-| **[Installation Guide](https://ismaelmartinez.github.io/teams-for-linux/installation)** | Package repositories and installation methods |
-| **[Configuration Guide](https://ismaelmartinez.github.io/teams-for-linux/configuration)** | Complete setup and configuration options |
-| **[Troubleshooting](https://ismaelmartinez.github.io/teams-for-linux/troubleshooting)** | Common issues and solutions |
-| **[Multiple Profiles](https://ismaelmartinez.github.io/teams-for-linux/multiple-instances)** | Running work & personal accounts |
-| **[Custom Backgrounds](https://ismaelmartinez.github.io/teams-for-linux/custom-backgrounds)** | Video call backgrounds setup |
-| **[Contributing](https://ismaelmartinez.github.io/teams-for-linux/contributing)** | Development setup and contribution guidelines |
-
-## Support & Community
-
-- 💬 **Chat**: Join our [Matrix Space](https://matrix.to/#/#teams-for-linux-space:matrix.org)
-- 🐛 **Issues**: [Report bugs](https://github.com/IsmaelMartinez/teams-for-linux/issues)
-- 🤝 **Contributing**: See [`CONTRIBUTING.md`](CONTRIBUTING.md)
-
-## Security & Sandboxing
-
-Electron's contextIsolation and sandbox features are disabled to enable Teams DOM access functionality. For enhanced security, use system-level sandboxing:
-
-**Available options**:
-- **Flatpak**: Built-in isolation via Flathub
-- **Snap packages**: Application confinement with auto-updates
-- **Firejail**: Use this [script](https://codeberg.org/lars_uffmann/teams-for-linux-jailed) for manual sandboxing
-- **AppArmor/SELinux**: Most Linux distributions include these by default
-
-System-level sandboxing provides better isolation than Electron's built-in features while preserving full functionality.
-
-## Advanced Usage
-
-## History
-
-Read about the history of this project in the [`HISTORY.md`](HISTORY.md) file.
-
-## License
-
-**GPL-3.0** — See [`LICENSE.md`](LICENSE.md)
-
-Icons from [Icon Duck](https://iconduck.com/sets/hugeicons-essential-free-icons) (CC BY 4.0)
+- [IsmaelMartinez/teams-for-linux](https://github.com/IsmaelMartinez/teams-for-linux) — the upstream project this is based on
+- PR #2311 by @IsmaelMartinez — auth recovery work that this branch is based on
