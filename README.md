@@ -63,7 +63,25 @@ sudo dpkg -i dist/teams-for-linux_*_amd64.deb
 
 ## Verifying the Fix
 
-Run from source with `npm start`. On first login after clearing the session, you should see lines like:
+The `[AUTH_PERSIST]` log messages are at `debug` level and won't appear in normal runs. To see them, enable debug logging via the app config file, clear your session, and run from source:
+
+```bash
+mkdir -p ~/.config/Electron
+cat > ~/.config/Electron/config.json << 'EOF'
+{
+  "logConfig": {
+    "transports": {
+      "console": { "level": "debug" },
+      "file": { "level": false }
+    }
+  }
+}
+EOF
+rm -rf ~/.config/Electron/Partitions/
+npm start
+```
+
+On login you should see:
 
 ```
 [AUTH_PERSIST] Stamped 90-day Max-Age on cookie: ESTSAUTH
@@ -71,7 +89,7 @@ Run from source with `npm start`. On first login after clearing the session, you
 [AUTH_PERSIST] Stamped 90-day Max-Age on cookie: ESTSAUTHLIGHT
 ```
 
-Close the app and reopen it the next day. If Teams loads without a Shibboleth redirect, the fix is working.
+Then close the app and reopen it the next day — if Teams loads without a Shibboleth redirect, the fix is working.
 
 ## Credits
 
