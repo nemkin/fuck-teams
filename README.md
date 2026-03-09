@@ -91,9 +91,19 @@ On login you should see:
 
 Then close the app and reopen it the next day — if Teams loads without a Shibboleth redirect, the fix is working.
 
+Note: if you also get logged out daily in Firefox when using the Teams web app, it is a strong signal that the server-side AAD session has a hard 24-hour expiry and the current fix will not help. Firefox restores session cookies via session restore, so if logout still happens there, AAD is actively rejecting the cookie server-side regardless of its client-side presence. In that case skip to the "If the Fix Doesn't Work" section below.
+
 ## If the Fix Doesn't Work
 
-If Teams still asks you to log in after a restart, the server-side AAD session has a hard 24-hour expiry and keeping the cookie alive client-side isn't enough. These are the next approaches to try, roughly in order of effort:
+There are two possible root causes, and which one applies determines what to try next.
+
+**Hypothesis A — Hard server-side session expiry (likely)**
+BME's AAD tenant is configured to expire sessions server-side after 24 hours regardless of cookie presence. AAD will return `login_required` even if the ESTSAUTH cookie is still alive on the client. Keeping the cookie persistent does nothing. Evidence for this: daily logout also happens in Firefox, which already restores session cookies across restarts via session restore. If Firefox logs you out too, it is almost certainly Hypothesis A.
+
+**Hypothesis B — Session cookie cleared on app close (less likely)**
+The ESTSAUTH cookie is a session cookie with no expiry. Electron (like Chromium) clears session cookies when the app closes, so every restart starts with no cookie. The current fix addresses exactly this by stamping a 90-day Max-Age on the cookie when it is first issued. If Hypothesis B is the cause, the fix works. If Firefox does not log you out but Electron does, it is Hypothesis B.
+
+If it is Hypothesis A, keeping the cookie alive client-side isn't enough. These are the next approaches to try, roughly in order of effort:
 
 **Option 1 — User-Agent spoofing**
 
